@@ -74,7 +74,6 @@ export function ToolOverlay({
   const deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y)
 
   const selectedId = officeState.selectedAgentId
-  const hoveredId = officeState.hoveredAgentId
 
   // All character IDs
   const allIds = [...agents, ...subagentCharacters.map((s) => s.id)]
@@ -86,9 +85,8 @@ export function ToolOverlay({
         if (!ch) return null
 
         const isSelected = selectedId === id
-        const isHovered = hoveredId === id
         const isSub = ch.isSubagent
-        const showDetails = isSelected || isHovered
+        const showDetails = isSelected
 
         // Position above character
         const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
