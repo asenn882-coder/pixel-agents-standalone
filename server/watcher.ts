@@ -5,7 +5,6 @@ import { homedir } from "os";
 import { EventEmitter } from "events";
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
-const ACTIVE_THRESHOLD_MS = 600_000; // 10 minutes — Claude can think for 5+ min without writing
 const POLL_INTERVAL_MS = 1000;
 
 export interface WatchedFile {
@@ -123,11 +122,6 @@ export class JsonlWatcher extends EventEmitter {
         const stat = statSync(path);
         if (stat.size > file.offset) {
           this.readNewLines(file);
-        }
-        // Remove stale files
-        if (Date.now() - stat.mtimeMs > ACTIVE_THRESHOLD_MS) {
-          this.files.delete(path);
-          this.emit("fileRemoved", file);
         }
       } catch {
         this.files.delete(path);
