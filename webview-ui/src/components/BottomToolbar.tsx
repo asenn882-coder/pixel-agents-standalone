@@ -10,6 +10,7 @@ interface BottomToolbarProps {
   isDebugMode: boolean
   onToggleDebugMode: () => void
   workspaceFolders: WorkspaceFolder[]
+  onSpawnAgent?: (task: string, workDir: string, name?: string) => void
 }
 
 const panelStyle: React.CSSProperties = {
@@ -51,12 +52,17 @@ export function BottomToolbar({
   isDebugMode,
   onToggleDebugMode,
   workspaceFolders,
+  onSpawnAgent,
 }: BottomToolbarProps) {
   const [hovered, setHovered] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false)
   const [hoveredFolder, setHoveredFolder] = useState<number | null>(null)
   const folderPickerRef = useRef<HTMLDivElement>(null)
+  const [isSpawnModalOpen, setIsSpawnModalOpen] = useState(false)
+  const [spawnTask, setSpawnTask] = useState('')
+  const [spawnWorkDir, setSpawnWorkDir] = useState('/root')
+  const [spawnName, setSpawnName] = useState('')
 
   // Close folder picker on outside click
   useEffect(() => {
@@ -73,11 +79,23 @@ export function BottomToolbar({
   const hasMultipleFolders = workspaceFolders.length > 1
 
   const handleAgentClick = () => {
+    if (onSpawnAgent) {
+      setSpawnTask('')
+      setSpawnName('')
+      setIsSpawnModalOpen(true)
+      return
+    }
     if (hasMultipleFolders) {
       setIsFolderPickerOpen((v) => !v)
     } else {
       onOpenClaude()
     }
+  }
+
+  const handleSpawnSubmit = () => {
+    if (!spawnTask.trim()) return
+    onSpawnAgent!(spawnTask.trim(), spawnWorkDir.trim() || '/root', spawnName.trim() || undefined)
+    setIsSpawnModalOpen(false)
   }
 
   const handleFolderSelect = (folder: WorkspaceFolder) => {
@@ -86,6 +104,124 @@ export function BottomToolbar({
   }
 
   return (
+    <>
+    {isSpawnModalOpen && (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+        }}
+        onClick={(e) => { if (e.target === e.currentTarget) setIsSpawnModalOpen(false) }}
+      >
+        <div
+          style={{
+            background: 'var(--pixel-bg)',
+            border: '2px solid var(--pixel-border-light)',
+            boxShadow: 'var(--pixel-shadow)',
+            padding: '16px 20px',
+            minWidth: 320,
+            maxWidth: 480,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div style={{ fontSize: '24px', color: 'var(--pixel-text)', fontWeight: 'bold' }}>
+            新しいエージェントを起動
+          </div>
+          <div>
+            <div style={{ fontSize: '20px', color: 'var(--pixel-text-dim)', marginBottom: 4 }}>タスク</div>
+            <textarea
+              autoFocus
+              value={spawnTask}
+              onChange={(e) => setSpawnTask(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleSpawnSubmit() }}
+              placeholder="例: src/以下のTypeScriptエラーを全部修正して"
+              rows={4}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                background: 'var(--vscode-input-background, #1e1e1e)',
+                color: 'var(--vscode-input-foreground, #d4d4d4)',
+                border: '1px solid var(--pixel-border)',
+                padding: '6px 8px',
+                fontSize: '20px',
+                resize: 'vertical',
+                borderRadius: 0,
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: '20px', color: 'var(--pixel-text-dim)', marginBottom: 4 }}>エージェント名（省略可）</div>
+            <input
+              type="text"
+              value={spawnName}
+              onChange={(e) => setSpawnName(e.target.value)}
+              placeholder="例: フロントエンド担当"
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                background: 'var(--vscode-input-background, #1e1e1e)',
+                color: 'var(--vscode-input-foreground, #d4d4d4)',
+                border: '1px solid var(--pixel-border)',
+                padding: '5px 8px',
+                fontSize: '20px',
+                borderRadius: 0,
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: '20px', color: 'var(--pixel-text-dim)', marginBottom: 4 }}>作業ディレクトリ</div>
+            <input
+              type="text"
+              value={spawnWorkDir}
+              onChange={(e) => setSpawnWorkDir(e.target.value)}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                background: 'var(--vscode-input-background, #1e1e1e)',
+                color: 'var(--vscode-input-foreground, #d4d4d4)',
+                border: '1px solid var(--pixel-border)',
+                padding: '5px 8px',
+                fontSize: '20px',
+                borderRadius: 0,
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => setIsSpawnModalOpen(false)}
+              style={{ ...btnBase, fontSize: '22px' }}
+            >
+              キャンセル
+            </button>
+            <button
+              onClick={handleSpawnSubmit}
+              disabled={!spawnTask.trim()}
+              style={{
+                ...btnBase,
+                fontSize: '22px',
+                background: spawnTask.trim() ? 'var(--pixel-agent-bg)' : undefined,
+                border: '2px solid var(--pixel-agent-border)',
+                color: 'var(--pixel-agent-text)',
+                opacity: spawnTask.trim() ? 1 : 0.4,
+                cursor: spawnTask.trim() ? 'pointer' : 'default',
+              }}
+            >
+              起動 (Ctrl+Enter)
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     <div style={panelStyle}>
       <div ref={folderPickerRef} style={{ position: 'relative' }}>
         <button
@@ -187,5 +323,6 @@ export function BottomToolbar({
         />
       </div>
     </div>
+    </>
   )
 }

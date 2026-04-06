@@ -133,7 +133,34 @@ export function renderScene(
     // Sort characters by bottom of their tile (not center) so they render
     // in front of same-row furniture (e.g. chairs) but behind furniture
     // at lower rows (e.g. desks, bookshelves that occlude from below).
-    const charZY = ch.y + TILE_SIZE / 2 + CHARACTER_Z_SORT_OFFSET
+    // Add fractional x-tiebreak so same-row characters sort left-behind, right-in-front
+    // (consistent top-down RPG perspective; prevents random overlap based on insertion order).
+    const charZY = ch.y + TILE_SIZE / 2 + CHARACTER_Z_SORT_OFFSET + ch.x * 0.0001
+
+    // Subagent indicator: draw a colored glow ring at the character's feet
+    if (ch.isSubagent) {
+      const subCh = ch
+      const footX = Math.round(offsetX + subCh.x * zoom)
+      const footY = Math.round(offsetY + (subCh.y + sittingOffset) * zoom)
+      drawables.push({
+        zY: charZY - OUTLINE_Z_SORT_OFFSET - 0.001, // just below character
+        draw: (c) => {
+          c.save()
+          const rx = Math.max(4, 7 * zoom)
+          const ry = Math.max(2, 3.5 * zoom)
+          c.beginPath()
+          c.ellipse(footX, footY, rx, ry, 0, 0, Math.PI * 2)
+          c.strokeStyle = '#7cb9ff'
+          c.lineWidth = Math.max(1, 1.5 * zoom)
+          c.globalAlpha = 0.8
+          c.stroke()
+          c.globalAlpha = 0.18
+          c.fillStyle = '#7cb9ff'
+          c.fill()
+          c.restore()
+        },
+      })
+    }
 
     // Matrix spawn/despawn effect — skip outline, use per-pixel rendering
     if (ch.matrixEffect) {

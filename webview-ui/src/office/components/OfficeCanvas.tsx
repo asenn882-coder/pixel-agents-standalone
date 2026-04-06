@@ -14,6 +14,7 @@ import { unlockAudio } from '../../notificationSound.js'
 interface OfficeCanvasProps {
   officeState: OfficeState
   onClick: (agentId: number) => void
+  onDoubleClickAgent?: (agentId: number) => void
   isEditMode: boolean
   editorState: EditorState
   onEditorTileAction: (col: number, row: number) => void
@@ -28,7 +29,7 @@ interface OfficeCanvasProps {
   panRef: React.MutableRefObject<{ x: number; y: number }>
 }
 
-export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef }: OfficeCanvasProps) {
+export function OfficeCanvas({ officeState, onClick, onDoubleClickAgent, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const offsetRef = useRef({ x: 0, y: 0 })
@@ -605,6 +606,23 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
     [officeState, onClick, screenToWorld, screenToTile, isEditMode],
   )
 
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (isEditMode) return
+      if (!onDoubleClickAgent) return
+      const pos = screenToWorld(e.clientX, e.clientY)
+      if (!pos) return
+      const hitId = officeState.getCharacterAt(pos.worldX, pos.worldY)
+      if (hitId !== null) {
+        const ch = officeState.characters.get(hitId)
+        if (ch && !ch.isSubagent) {
+          onDoubleClickAgent(hitId)
+        }
+      }
+    },
+    [isEditMode, onDoubleClickAgent, officeState, screenToWorld],
+  )
+
   const handleMouseLeave = useCallback(() => {
     isPanningRef.current = false
     isEraseDraggingRef.current = false
@@ -679,6 +697,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
         onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
         onAuxClick={handleAuxClick}
         onMouseLeave={handleMouseLeave}
         onWheel={handleWheel}

@@ -14,6 +14,8 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
 import { ZoomControls } from './components/ZoomControls.js'
 import { BottomToolbar } from './components/BottomToolbar.js'
 import { DebugView } from './components/DebugView.js'
+import { AgentStatusPanel } from './components/AgentStatusPanel.js'
+import type { AgentEntry } from './components/AgentStatusPanel.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -121,9 +123,11 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, agentProjectDirs, layoutReady, loadedAssets, workspaceFolders } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
+  const [chatTarget, setChatTarget] = useState<{ id: number; name: string; projectDir: string } | null>(null)
+  const [chatTask, setChatTask] = useState('')
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
 
@@ -150,6 +154,24 @@ function App() {
     vscode.postMessage({ type: 'closeAgent', id })
   }, [])
 
+  const handleDoubleClickAgent = useCallback((id: number) => {
+    const ch = getOfficeState().characters.get(id)
+    const name = ch?.folderName || `エージェント${id}`
+    const projectDir = agentProjectDirs[id] || '/root'
+    setChatTask('')
+    setChatTarget({ id, name, projectDir })
+  }, [agentProjectDirs])
+
+  const handleChatSubmit = useCallback(() => {
+    if (!chatTarget || !chatTask.trim()) return
+    vscode.postMessage({ type: 'createAgent', task: chatTask.trim(), workDir: chatTarget.projectDir })
+    setChatTarget(null)
+  }, [chatTarget, chatTask])
+
+  const handleSpawnAgent = useCallback((task: string, workDir: string, name?: string) => {
+    vscode.postMessage({ type: 'createAgent', task, workDir, name })
+  }, [])
+
   const handleClick = useCallback((agentId: number) => {
     // If clicked agent is a sub-agent, focus the parent's terminal instead
     const os = getOfficeState()
@@ -159,6 +181,52 @@ function App() {
   }, [])
 
   const officeState = getOfficeState()
+
+  // Build agent status panel entries
+  const agentStatusEntries: AgentEntry[] = [...agents, ...subagentCharacters.map((s) => s.id)].flatMap((id) => {
+    const ch = officeState.characters.get(id)
+    if (!ch) return []
+    const isSub = ch.isSubagent
+    const sub = isSub ? subagentCharacters.find((s) => s.id === id) : undefined
+    const name = isSub ? `エージェント${sub?.parentAgentId ?? '?'}のサブ` : (ch.folderName || `エージェント${id}`)
+    const hasPermission = agentTools[id]?.some((t) => t.permissionWait && !t.done) || (isSub && ch.bubbleType === 'permission')
+
+    let statusLabel = ''
+    let statusColor: string | null = null
+    let isPulsing = false
+    if (hasPermission) {
+      statusLabel = '承認待ち'
+      statusColor = 'var(--pixel-status-permission)'
+    } else if (ch.isActive) {
+      statusLabel = '進行中'
+      statusColor = 'var(--pixel-status-active)'
+      isPulsing = true
+    } else {
+      statusLabel = 'タスク待ち'
+      statusColor = '#ffb74d'
+    }
+
+    let activityText = ''
+    if (isSub) {
+      if (ch.bubbleType === 'permission') {
+        activityText = 'Needs approval'
+      } else {
+        activityText = sub ? sub.label : 'サブタスク'
+      }
+    } else {
+      const tools = agentTools[id]
+      if (tools && tools.length > 0) {
+        const activeTool = [...tools].reverse().find((t) => !t.done)
+        if (activeTool) {
+          activityText = activeTool.permissionWait ? 'Needs approval' : activeTool.status
+        } else if (ch.isActive) {
+          activityText = tools[tools.length - 1]?.status ?? ''
+        }
+      }
+    }
+
+    return [{ id, name, statusLabel, statusColor, activityText, isPulsing }]
+  })
 
   // Force dependency on editorTickForKeyboard to propagate keyboard-triggered re-renders
   void editorTickForKeyboard
@@ -184,6 +252,89 @@ function App() {
   }
 
   return (
+    <>
+    {chatTarget && (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+        }}
+        onClick={(e) => { if (e.target === e.currentTarget) setChatTarget(null) }}
+      >
+        <div
+          style={{
+            background: 'var(--pixel-bg)',
+            border: '2px solid var(--pixel-border-light)',
+            boxShadow: 'var(--pixel-shadow)',
+            padding: '16px 20px',
+            minWidth: 320,
+            maxWidth: 480,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div style={{ fontSize: '24px', color: 'var(--pixel-text)', fontWeight: 'bold' }}>
+            {chatTarget.name} にタスクを依頼
+          </div>
+          <div style={{ fontSize: '18px', color: 'var(--pixel-text-dim)' }}>
+            {chatTarget.projectDir}
+          </div>
+          <div>
+            <div style={{ fontSize: '20px', color: 'var(--pixel-text-dim)', marginBottom: 4 }}>タスク</div>
+            <textarea
+              autoFocus
+              value={chatTask}
+              onChange={(e) => setChatTask(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleChatSubmit() }}
+              placeholder="例: このディレクトリのTypeScriptエラーを修正して"
+              rows={4}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                background: 'var(--vscode-input-background, #1e1e1e)',
+                color: 'var(--vscode-input-foreground, #d4d4d4)',
+                border: '1px solid var(--pixel-border)',
+                padding: '6px 8px',
+                fontSize: '20px',
+                resize: 'vertical',
+                borderRadius: 0,
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => setChatTarget(null)}
+              style={{ padding: '5px 10px', fontSize: '22px', color: 'var(--pixel-text)', background: 'var(--pixel-btn-bg)', border: '2px solid transparent', borderRadius: 0, cursor: 'pointer' }}
+            >
+              キャンセル
+            </button>
+            <button
+              onClick={handleChatSubmit}
+              disabled={!chatTask.trim()}
+              style={{
+                padding: '5px 10px',
+                fontSize: '22px',
+                background: chatTask.trim() ? 'var(--pixel-agent-bg)' : undefined,
+                border: '2px solid var(--pixel-agent-border)',
+                color: 'var(--pixel-agent-text)',
+                borderRadius: 0,
+                opacity: chatTask.trim() ? 1 : 0.4,
+                cursor: chatTask.trim() ? 'pointer' : 'default',
+              }}
+            >
+              依頼 (Ctrl+Enter)
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
       <style>{`
         @keyframes pixel-agents-pulse {
@@ -196,6 +347,7 @@ function App() {
       <OfficeCanvas
         officeState={officeState}
         onClick={handleClick}
+        onDoubleClickAgent={handleDoubleClickAgent}
         isEditMode={editor.isEditMode}
         editorState={editorState}
         onEditorTileAction={editor.handleEditorTileAction}
@@ -230,6 +382,7 @@ function App() {
         isDebugMode={isDebugMode}
         onToggleDebugMode={handleToggleDebugMode}
         workspaceFolders={workspaceFolders}
+        onSpawnAgent={handleSpawnAgent}
       />
 
       {editor.isEditMode && editor.isDirty && (
@@ -296,6 +449,8 @@ function App() {
         onCloseAgent={handleCloseAgent}
       />
 
+      <AgentStatusPanel entries={agentStatusEntries} />
+
       {isDebugMode && (
         <DebugView
           agents={agents}
@@ -307,6 +462,7 @@ function App() {
         />
       )}
     </div>
+    </>
   )
 }
 

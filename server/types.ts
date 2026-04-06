@@ -30,10 +30,10 @@ export interface TrackedAgent {
 
 // Messages sent from server to client via WebSocket
 // Must match the upstream message format expected by useExtensionMessages
-export type ServerMessage =
-  | { type: "agentCreated"; id: number; folderName: string }
+export type ServerMessage = TaskServerMessage
+  | { type: "agentCreated"; id: number; folderName: string; projectDir?: string }
   | { type: "agentClosed"; id: number }
-  | { type: "existingAgents"; agents: number[]; folderNames: Record<number, string>; agentMeta?: Record<number, { palette?: number; hueShift?: number; seatId?: string }> }
+  | { type: "existingAgents"; agents: number[]; folderNames: Record<number, string>; projectDirs?: Record<number, string>; agentMeta?: Record<number, { palette?: number; hueShift?: number; seatId?: string }> }
   | { type: "agentToolStart"; id: number; toolId: string; status: string }
   | { type: "agentToolDone"; id: number; toolId: string }
   | { type: "agentToolsClear"; id: number }
@@ -49,11 +49,33 @@ export type ServerMessage =
   | { type: "wallTilesLoaded"; sprites: unknown[] }
   | { type: "furnitureAssetsLoaded"; catalog: unknown[]; sprites: Record<string, unknown> }
   | { type: "layoutLoaded"; layout: unknown; version: number }
-  | { type: "settingsLoaded"; soundEnabled: boolean };
+  | { type: "settingsLoaded"; soundEnabled: boolean }
+  | { type: "agentSpawning"; task: string }
+  | { type: "agentSpawnError"; error: string };
+
+// Manual task (UI-created, not from JSONL watcher)
+export interface ManualTask {
+  id: number;
+  name: string;
+  status: "todo" | "in_progress" | "done";
+  createdAt: number;
+}
+
+// Messages sent from server to client via WebSocket
+// Must match the upstream message format expected by useExtensionMessages
+export type TaskServerMessage =
+  | { type: "existingTasks"; tasks: ManualTask[] }
+  | { type: "taskCreated"; task: ManualTask }
+  | { type: "taskUpdated"; task: ManualTask }
+  | { type: "taskDeleted"; id: number };
 
 // Messages sent from client to server
 export type ClientMessage =
   | { type: "ready" }
   | { type: "webviewReady" }
   | { type: "saveLayout"; layout: unknown }
-  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> };
+  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> }
+  | { type: "createTask"; name: string }
+  | { type: "updateTask"; id: number; status: "todo" | "in_progress" | "done" }
+  | { type: "deleteTask"; id: number }
+  | { type: "createAgent"; task: string; workDir: string; name?: string };

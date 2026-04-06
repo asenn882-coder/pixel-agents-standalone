@@ -2,7 +2,7 @@ import * as path from "path";
 import type { TrackedAgent, ServerMessage } from "./types.js";
 
 const READING_TOOLS = new Set(["Read", "Grep", "Glob", "WebFetch", "WebSearch"]);
-const PERMISSION_EXEMPT_TOOLS = new Set(["Task", "AskUserQuestion"]);
+const PERMISSION_EXEMPT_TOOLS = new Set(["Task", "Agent", "AskUserQuestion"]);
 const PERMISSION_TIMER_DELAY_MS = 7000;
 const TEXT_IDLE_DELAY_MS = 5000;
 const TOOL_DONE_DELAY_MS = 300;
@@ -14,6 +14,10 @@ const IDLE_ACTIVITY_TIMEOUT_MS = 120_000; // 2 min — long-running tools (build
 const waitingTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const permissionTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const idleTimeoutTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function isSubagentTool(name: string): boolean {
+  return name === "Task" || name === "Agent";
+}
 
 function formatToolStatus(toolName: string, input: Record<string, unknown>): string {
   const base = (p: unknown) => (typeof p === "string" ? path.basename(p) : "");
@@ -36,11 +40,11 @@ function formatToolStatus(toolName: string, input: Record<string, unknown>): str
       return "Fetching web content";
     case "WebSearch":
       return "Searching the web";
-    case "Task": {
+    case "Task":
+    case "Agent": {
       const desc = typeof input.description === "string" ? input.description : "";
-      return desc
-        ? `Subtask: ${desc.length > TASK_DESCRIPTION_DISPLAY_MAX_LENGTH ? desc.slice(0, TASK_DESCRIPTION_DISPLAY_MAX_LENGTH) + "\u2026" : desc}`
-        : "Running subtask";
+      const truncated = desc.length > TASK_DESCRIPTION_DISPLAY_MAX_LENGTH ? desc.slice(0, TASK_DESCRIPTION_DISPLAY_MAX_LENGTH) + "\u2026" : desc;
+      return `Subtask: ${truncated}`;
     }
     case "AskUserQuestion":
       return "Waiting for your answer";
@@ -229,8 +233,8 @@ function handleUserMessage(
         if (block.type === "tool_result" && block.tool_use_id) {
           const completedToolId = block.tool_use_id as string;
 
-          // If completed tool was a Task, clear its subagent tools
-          if (agent.activeToolNames.get(completedToolId) === "Task") {
+          // If completed tool was a subagent-spawning tool, clear its subagent tools
+          if (isSubagentTool(agent.activeToolNames.get(completedToolId) ?? "")) {
             agent.activeSubagentToolIds.delete(completedToolId);
             agent.activeSubagentToolNames.delete(completedToolId);
             emit({
@@ -257,14 +261,24 @@ function handleUserMessage(
       // New user text prompt — new turn starting
       cancelTimer(agent.id, waitingTimers);
       cancelTimer(agent.id, idleTimeoutTimers);
+      const wasWaiting = agent.isWaiting;
       clearAgentActivity(agent, emit);
+      agent.isWaiting = false;
       agent.hadToolsInTurn = false;
+      if (wasWaiting) {
+        emit({ type: "agentStatus", id: agent.id, status: "active" });
+      }
     }
   } else if (typeof content === "string" && (content as string).trim()) {
     cancelTimer(agent.id, waitingTimers);
     cancelTimer(agent.id, idleTimeoutTimers);
+    const wasWaiting = agent.isWaiting;
     clearAgentActivity(agent, emit);
+    agent.isWaiting = false;
     agent.hadToolsInTurn = false;
+    if (wasWaiting) {
+      emit({ type: "agentStatus", id: agent.id, status: "active" });
+    }
   }
 }
 
@@ -281,11 +295,21 @@ function handleSystemMessage(
     cancelTimer(agent.id, idleTimeoutTimers);
 
     if (agent.activeTools.size > 0) {
-      agent.activeTools.clear();
-      agent.activeToolNames.clear();
-      agent.activeSubagentToolIds.clear();
-      agent.activeSubagentToolNames.clear();
-      emit({ type: "agentToolsClear", id: agent.id });
+      // Subagent-spawning tools are long-running — they outlive the assistant turn and only complete
+      // when their tool_result arrives. Preserve them so subagent characters survive.
+      for (const [toolId, toolName] of [...agent.activeToolNames]) {
+        if (!isSubagentTool(toolName)) {
+          agent.activeTools.delete(toolId);
+          agent.activeToolNames.delete(toolId);
+        }
+      }
+      if (agent.activeTools.size === 0) {
+        // No subagent-spawning tools remain — clear subagent state and notify clients
+        agent.activeSubagentToolIds.clear();
+        agent.activeSubagentToolNames.clear();
+        emit({ type: "agentToolsClear", id: agent.id });
+      }
+      // If Task tools remain: keep activeTools, activeToolNames, and subagent state intact
     }
 
     agent.isWaiting = true;
@@ -317,8 +341,8 @@ function handleProgressMessage(
     return;
   }
 
-  // Only handle subagent progress for Task tools
-  if (agent.activeToolNames.get(parentToolId) !== "Task") return;
+  // Only handle subagent progress for subagent-spawning tools
+  if (!isSubagentTool(agent.activeToolNames.get(parentToolId) ?? "")) return;
 
   const msg = data.message as Record<string, unknown> | undefined;
   if (!msg) return;
@@ -389,6 +413,98 @@ function handleProgressMessage(
   }
 }
 
+/**
+ * Process a single JSONL line from a subagent's own JSONL file.
+ * Called by index.ts when a line arrives from a subagent session file.
+ * parentToolId is the Agent tool_use ID in the parent agent that spawned this subagent.
+ */
+export function processSubagentLine(
+  line: string,
+  parentAgentId: number,
+  parentToolId: string,
+  agent: TrackedAgent,
+  emit: (msg: ServerMessage) => void,
+): void {
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  const type = record.type as string;
+
+  if (type === "assistant") {
+    const message = record.message as Record<string, unknown> | undefined;
+    if (!message?.content) return;
+    const content = message.content as Array<Record<string, unknown>>;
+    if (!Array.isArray(content)) return;
+
+    let hasNonExemptSubTool = false;
+    for (const block of content) {
+      if (block.type === "tool_use" && block.id) {
+        const toolId = block.id as string;
+        const toolName = (block.name as string) || "";
+        const input = (block.input as Record<string, unknown>) || {};
+        const status = formatToolStatus(toolName, input);
+
+        let subTools = agent.activeSubagentToolIds.get(parentToolId);
+        if (!subTools) {
+          subTools = new Set();
+          agent.activeSubagentToolIds.set(parentToolId, subTools);
+        }
+        subTools.add(toolId);
+
+        let subNames = agent.activeSubagentToolNames.get(parentToolId);
+        if (!subNames) {
+          subNames = new Map();
+          agent.activeSubagentToolNames.set(parentToolId, subNames);
+        }
+        subNames.set(toolId, toolName);
+
+        if (!PERMISSION_EXEMPT_TOOLS.has(toolName)) {
+          hasNonExemptSubTool = true;
+        }
+
+        emit({
+          type: "subagentToolStart",
+          id: parentAgentId,
+          parentToolId,
+          toolId,
+          status,
+        });
+      }
+    }
+    if (hasNonExemptSubTool) {
+      startPermissionTimer(agent, emit);
+    }
+  } else if (type === "user") {
+    const message = record.message as Record<string, unknown> | undefined;
+    if (!message?.content) return;
+    const content = message.content as Array<Record<string, unknown>>;
+    if (!Array.isArray(content)) return;
+
+    for (const block of content) {
+      if (block.type === "tool_result" && block.tool_use_id) {
+        const toolId = block.tool_use_id as string;
+        const subTools = agent.activeSubagentToolIds.get(parentToolId);
+        if (subTools) subTools.delete(toolId);
+        const subNames = agent.activeSubagentToolNames.get(parentToolId);
+        if (subNames) subNames.delete(toolId);
+
+        setTimeout(() => {
+          emit({
+            type: "subagentToolDone",
+            id: parentAgentId,
+            parentToolId,
+            toolId,
+          });
+        }, TOOL_DONE_DELAY_MS);
+      }
+    }
+  }
+}
+
 function clearAgentActivity(
   agent: TrackedAgent,
   emit: (msg: ServerMessage) => void,
@@ -402,6 +518,7 @@ function clearAgentActivity(
     agent.activeSubagentToolNames.clear();
     emit({ type: "agentToolsClear", id: agent.id });
   }
+
   if (agent.permissionSent) {
     agent.permissionSent = false;
     emit({ type: "agentToolPermissionClear", id: agent.id });

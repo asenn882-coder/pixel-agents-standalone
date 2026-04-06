@@ -14,6 +14,7 @@ export interface WatchedFile {
   projectName: string;
   offset: number;
   lineBuffer: string;
+  parentSessionId?: string; // set for subagent JSONL files
 }
 
 export class JsonlWatcher extends EventEmitter {
@@ -59,6 +60,23 @@ export class JsonlWatcher extends EventEmitter {
               this.addFile(filePath);
             }
           }
+          // Also scan subagent JSONL files: {projectDir}/{sessionId}/subagents/*.jsonl
+          for (const sessionEntry of files) {
+            const sessionSubDir = join(dirPath, sessionEntry, "subagents");
+            try {
+              const subFiles = readdirSync(sessionSubDir);
+              for (const sf of subFiles) {
+                if (!sf.endsWith(".jsonl")) continue;
+                const subFilePath = join(sessionSubDir, sf);
+                const stat = statSync(subFilePath);
+                if (Date.now() - stat.mtimeMs < ACTIVE_THRESHOLD_MS) {
+                  this.addFile(subFilePath);
+                }
+              }
+            } catch {
+              /* subagents dir may not exist */
+            }
+          }
         } catch {
           /* skip unreadable dirs */
         }
@@ -72,10 +90,22 @@ export class JsonlWatcher extends EventEmitter {
     if (this.files.has(filePath)) return;
 
     const sessionId = basename(filePath, ".jsonl");
-    const projectDirName = basename(dirname(filePath));
-    // Extract short project name: "-Users-alice-Documents-myproject-657" -> "657"
-    const parts = projectDirName.split("-").filter(Boolean);
-    const projectName = parts[parts.length - 1] || sessionId.slice(0, 8);
+    const parentDirName = basename(dirname(filePath));
+
+    let projectName: string;
+    let parentSessionId: string | undefined;
+
+    if (parentDirName === "subagents") {
+      // Subagent file: {projectDir}/{parentSessionId}/subagents/{subSessionId}.jsonl
+      parentSessionId = basename(dirname(dirname(filePath)));
+      const projectDirName = basename(dirname(dirname(dirname(filePath))));
+      const parts = projectDirName.split("-").filter(Boolean);
+      projectName = parts[parts.length - 1] || sessionId.slice(0, 8);
+    } else {
+      // Normal session file: {projectDir}/{sessionId}.jsonl
+      const parts = parentDirName.split("-").filter(Boolean);
+      projectName = parts[parts.length - 1] || sessionId.slice(0, 8);
+    }
 
     const file: WatchedFile = {
       path: filePath,
@@ -83,6 +113,7 @@ export class JsonlWatcher extends EventEmitter {
       projectName,
       offset: 0,
       lineBuffer: "",
+      parentSessionId,
     };
 
     this.files.set(filePath, file);

@@ -96,34 +96,35 @@ export function ToolOverlay({
         const screenY = (deviceOffsetY + (ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET) * zoom) / dpr
 
         // Always show name label; show activity details on hover/select
-        const displayName = ch.folderName || (isSub ? 'Subtask' : `Agent #${id}`)
+        const sub = isSub ? subagentCharacters.find((s) => s.id === id) : undefined
+        const displayName = isSub
+          ? `↳${sub?.parentAgentId ?? '?'}`
+          : (ch.folderName || `エージェント${id}`)
 
-        // Get activity text (only needed when showing details)
-        let activityText = ''
+        // Compute status (always, not just on hover)
+        const tools = agentTools[id]
+        const subHasPermission = isSub && ch.bubbleType === 'permission'
+        const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done)
+
         let dotColor: string | null = null
-        if (showDetails) {
-          const subHasPermission = isSub && ch.bubbleType === 'permission'
-          if (isSub) {
-            if (subHasPermission) {
-              activityText = 'Needs approval'
-            } else {
-              const sub = subagentCharacters.find((s) => s.id === id)
-              activityText = sub ? sub.label : 'Subtask'
-            }
+        if (hasPermission) {
+          dotColor = 'var(--pixel-status-permission)'
+        } else if (ch.isActive) {
+          dotColor = 'var(--pixel-status-active)'
+        } else {
+          dotColor = '#ffb74d'
+        }
+
+        // Get activity text (always computed)
+        let activityText = ''
+        if (isSub) {
+          if (subHasPermission) {
+            activityText = 'Needs approval'
           } else {
-            activityText = getActivityText(id, agentTools, ch.isActive)
+            activityText = sub ? sub.label : 'サブタスク'
           }
-
-          const tools = agentTools[id]
-          const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done)
-          const hasActiveTools = tools?.some((t) => !t.done)
-          const isActive = ch.isActive
-
-          if (hasPermission) {
-            dotColor = 'var(--pixel-status-permission)'
-          } else if (isActive && hasActiveTools) {
-            dotColor = 'var(--pixel-status-active)'
-          }
+        } else {
+          activityText = getActivityText(id, agentTools, ch.isActive)
         }
 
         return (
@@ -227,20 +228,40 @@ export function ToolOverlay({
             ) : (
               <div
                 style={{
-                  background: 'var(--pixel-bg)',
-                  border: '1px solid var(--pixel-border)',
-                  padding: '1px 6px',
-                  boxShadow: 'var(--pixel-shadow)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: isSub ? 'rgba(30,60,110,0.75)' : 'rgba(0,0,0,0.55)',
+                  border: isSub ? '1px solid rgba(124,185,255,0.5)' : '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 0,
+                  padding: '2px 5px',
                   whiteSpace: 'nowrap',
+                  maxWidth: 120,
+                  pointerEvents: 'none',
                 }}
               >
+                {dotColor && (
+                  <span
+                    className={dotColor === 'var(--pixel-status-active)' && ch.isActive ? 'pixel-agents-pulse' : undefined}
+                    style={{
+                      width: 5,
+                      height: 5,
+                      borderRadius: '50%',
+                      background: dotColor,
+                      flexShrink: 0,
+                    }}
+                  />
+                )}
                 <span
                   style={{
-                    fontSize: '16px',
-                    color: 'var(--pixel-text-dim)',
+                    fontSize: '14px',
+                    color: 'rgba(255,255,255,0.85)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    fontStyle: isSub ? 'italic' : undefined,
                   }}
                 >
-                  {displayName}
+                  {displayName.length > 14 ? displayName.slice(0, 13) + '…' : displayName}
                 </span>
               </div>
             )}

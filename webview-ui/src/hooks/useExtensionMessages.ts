@@ -40,6 +40,13 @@ export interface WorkspaceFolder {
   path: string
 }
 
+export interface ManualTask {
+  id: number
+  name: string
+  status: 'todo' | 'in_progress' | 'done'
+  createdAt: number
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
@@ -47,9 +54,26 @@ export interface ExtensionMessageState {
   agentStatuses: Record<number, string>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
+  agentProjectDirs: Record<number, string>
   layoutReady: boolean
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> }
   workspaceFolders: WorkspaceFolder[]
+  tasks: ManualTask[]
+}
+
+function applyTaskStatus(os: OfficeState, task: { id: number; status: string }): void {
+  if (task.status === 'in_progress') {
+    os.setAgentActive(task.id, true)
+    os.setAgentTool(task.id, '進行中')
+  } else if (task.status === 'done') {
+    os.setAgentActive(task.id, false)
+    os.setAgentTool(task.id, null)
+    os.showWaitingBubble(task.id)
+  } else {
+    // todo
+    os.setAgentActive(task.id, false)
+    os.setAgentTool(task.id, null)
+  }
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -75,6 +99,8 @@ export function useExtensionMessages(
   const [layoutReady, setLayoutReady] = useState(false)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([])
+  const [tasks, setTasks] = useState<ManualTask[]>([])
+  const [agentProjectDirs, setAgentProjectDirs] = useState<Record<number, string>>({})
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
@@ -115,14 +141,24 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number
         const folderName = msg.folderName as string | undefined
+        const projectDir = msg.projectDir as string | undefined
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]))
         setSelectedAgent(id)
         os.addAgent(id, undefined, undefined, undefined, undefined, folderName)
+        if (projectDir) {
+          setAgentProjectDirs((prev) => ({ ...prev, [id]: projectDir }))
+        }
         saveAgentSeats(os)
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number
         setAgents((prev) => prev.filter((a) => a !== id))
         setSelectedAgent((prev) => (prev === id ? null : prev))
+        setAgentProjectDirs((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         setAgentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -149,10 +185,15 @@ export function useExtensionMessages(
         const incoming = msg.agents as number[]
         const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string }>
         const folderNames = (msg.folderNames || {}) as Record<number, string>
+        const projectDirs = (msg.projectDirs || {}) as Record<number, string>
+        const statuses = (msg.agentStatuses || {}) as Record<number, string>
         // Buffer agents — they'll be added in layoutLoaded after seats are built
         for (const id of incoming) {
           const m = meta[id]
           pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId, folderName: folderNames[id] })
+        }
+        if (Object.keys(projectDirs).length > 0) {
+          setAgentProjectDirs((prev) => ({ ...prev, ...projectDirs }))
         }
         setAgents((prev) => {
           const ids = new Set(prev)
@@ -164,10 +205,15 @@ export function useExtensionMessages(
           }
           return merged.sort((a, b) => a - b)
         })
+        // Restore waiting statuses for agents that were waiting when we connected
+        if (Object.keys(statuses).length > 0) {
+          setAgentStatuses((prev) => ({ ...prev, ...statuses }))
+        }
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
         const toolId = msg.toolId as string
         const status = msg.status as string
+        console.log(`[agentToolStart] id=${id} toolId=${toolId} status="${status}" isSubtask=${status.startsWith('Subtask:')} agentInState=${!!os.characters.get(id)}`)
         setAgentTools((prev) => {
           const list = prev[id] || []
           if (list.some((t) => t.toolId === toolId)) return prev
@@ -181,6 +227,10 @@ export function useExtensionMessages(
         if (status.startsWith('Subtask:')) {
           const label = status.slice('Subtask:'.length).trim()
           const subId = os.addSubagent(id, toolId)
+          console.log(`[agentToolStart] addSubagent(${id}, ${toolId}) => subId=${subId}`)
+          // Set folderName on sub-agent character so name tag shows the task label
+          const subCh = os.characters.get(subId)
+          if (subCh) subCh.folderName = label || 'Subtask'
           setSubagentCharacters((prev) => {
             if (prev.some((s) => s.id === subId)) return prev
             return [...prev, { id: subId, parentAgentId: id, parentToolId: toolId, label }]
@@ -285,13 +335,18 @@ export function useExtensionMessages(
           if (list.some((t) => t.toolId === toolId)) return prev
           return { ...prev, [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] } }
         })
-        // Update sub-agent character's tool and active state
-        const subId = os.getSubagentId(id, parentToolId)
-        if (subId !== null) {
-          const subToolName = extractToolName(status)
-          os.setAgentTool(subId, subToolName)
-          os.setAgentActive(subId, true)
+        // Ensure sub-agent character exists (e.g. on reconnect or when Task had no description)
+        let subId = os.getSubagentId(id, parentToolId)
+        if (subId === null) {
+          subId = os.addSubagent(id, parentToolId)
+          setSubagentCharacters((prev) => {
+            if (prev.some((s) => s.id === subId)) return prev
+            return [...prev, { id: subId!, parentAgentId: id, parentToolId, label: '' }]
+          })
         }
+        const subToolName = extractToolName(status)
+        os.setAgentTool(subId, subToolName)
+        os.setAgentActive(subId, true)
       } else if (msg.type === 'subagentToolDone') {
         const id = msg.id as number
         const parentToolId = msg.parentToolId as string
@@ -353,6 +408,28 @@ export function useExtensionMessages(
         } catch (err) {
           console.error(`❌ Webview: Error processing furnitureAssetsLoaded:`, err)
         }
+      } else if (msg.type === 'existingTasks') {
+        setTasks(msg.tasks as ManualTask[])
+        // Sync task characters into office state
+        for (const task of msg.tasks as ManualTask[]) {
+          if (!os.characters.has(task.id)) {
+            os.addAgent(task.id, undefined, undefined, undefined, true, task.name)
+          }
+          applyTaskStatus(os, task)
+        }
+      } else if (msg.type === 'taskCreated') {
+        const task = msg.task as ManualTask
+        setTasks((prev) => [...prev, task])
+        os.addAgent(task.id, undefined, undefined, undefined, false, task.name)
+        applyTaskStatus(os, task)
+      } else if (msg.type === 'taskUpdated') {
+        const task = msg.task as ManualTask
+        setTasks((prev) => prev.map((t) => (t.id === task.id ? task : t)))
+        applyTaskStatus(os, task)
+      } else if (msg.type === 'taskDeleted') {
+        const id = msg.id as number
+        setTasks((prev) => prev.filter((t) => t.id !== id))
+        os.removeAgent(id)
       }
     }
     window.addEventListener('message', handler)
@@ -360,5 +437,5 @@ export function useExtensionMessages(
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders }
+  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, agentProjectDirs, layoutReady, loadedAssets, workspaceFolders, tasks }
 }
