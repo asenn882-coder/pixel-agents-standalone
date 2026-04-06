@@ -55,10 +55,7 @@ export class JsonlWatcher extends EventEmitter {
           for (const f of files) {
             if (!f.endsWith(".jsonl")) continue;
             const filePath = join(dirPath, f);
-            const stat = statSync(filePath);
-            if (Date.now() - stat.mtimeMs < ACTIVE_THRESHOLD_MS) {
-              this.addFile(filePath);
-            }
+            this.addFile(filePath);
           }
           // Also scan subagent JSONL files: {projectDir}/{sessionId}/subagents/*.jsonl
           for (const sessionEntry of files) {
@@ -68,10 +65,7 @@ export class JsonlWatcher extends EventEmitter {
               for (const sf of subFiles) {
                 if (!sf.endsWith(".jsonl")) continue;
                 const subFilePath = join(sessionSubDir, sf);
-                const stat = statSync(subFilePath);
-                if (Date.now() - stat.mtimeMs < ACTIVE_THRESHOLD_MS) {
-                  this.addFile(subFilePath);
-                }
+                this.addFile(subFilePath);
               }
             } catch {
               /* subagents dir may not exist */
