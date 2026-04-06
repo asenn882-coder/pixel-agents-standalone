@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { spawn } from "child_process";
+import pty from "node-pty";
 import { JsonlWatcher, type WatchedFile } from "./watcher.js";
 import { processTranscriptLine, processSubagentLine } from "./parser.js";
 import {
@@ -20,6 +21,13 @@ import type { TrackedAgent, ServerMessage, ManualTask } from "./types.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3456", 10);
 const IDLE_SHUTDOWN_MS = 600_000; // 10 minutes
+
+// PTY sessions: termId -> { pty, ws }
+interface PtySession {
+  ptyProc: ReturnType<typeof pty.spawn>;
+  ws: WebSocket;
+}
+const ptySessions = new Map<string, PtySession>();
 
 // State
 const agents = new Map<string, TrackedAgent>(); // sessionId -> agent
@@ -316,13 +324,77 @@ wss.on("connection", (ws) => {
         proc.unref();
         console.log(`[createAgent] Spawning ${claudeBin} -p "${task.slice(0, 60)}" in ${workDir}${agentName ? ` name="${agentName}"` : ""}`);
         ws.send(JSON.stringify({ type: "agentSpawning", task }));
+      } else if (msg.type === "openTerminal") {
+        const termId = String(msg.termId || "").trim();
+        const workDir = String(msg.workDir || homedir()).trim();
+        if (!termId) return;
+        // Kill existing PTY with same termId
+        const existing = ptySessions.get(termId);
+        if (existing) {
+          existing.ptyProc.kill();
+          ptySessions.delete(termId);
+        }
+        const claudeBin = process.env.CLAUDE_BIN || "claude";
+        const claudeArgs: string[] = [];
+        if (process.getuid && process.getuid() !== 0) {
+          claudeArgs.push("--dangerously-skip-permissions");
+        }
+        const ptyProc = pty.spawn(claudeBin, claudeArgs, {
+          name: "xterm-256color",
+          cols: 220,
+          rows: 50,
+          cwd: existsSync(workDir) ? workDir : homedir(),
+          env: process.env as Record<string, string>,
+        });
+        ptySessions.set(termId, { ptyProc, ws });
+        ptyProc.onData((data: string) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ptyOutput", termId, data }));
+          }
+        });
+        ptyProc.onExit(() => {
+          ptySessions.delete(termId);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ptyClosed", termId }));
+          }
+        });
+        ws.send(JSON.stringify({ type: "ptyOpened", termId }));
+        console.log(`[PTY] Opened terminal ${termId} in ${workDir}`);
+      } else if (msg.type === "ptyInput") {
+        const termId = String(msg.termId || "").trim();
+        const session = ptySessions.get(termId);
+        if (session && session.ws === ws) {
+          session.ptyProc.write(String(msg.data || ""));
+        }
+      } else if (msg.type === "ptyResize") {
+        const termId = String(msg.termId || "").trim();
+        const session = ptySessions.get(termId);
+        if (session && session.ws === ws) {
+          session.ptyProc.resize(Number(msg.cols) || 80, Number(msg.rows) || 24);
+        }
+      } else if (msg.type === "closeTerminal") {
+        const termId = String(msg.termId || "").trim();
+        const session = ptySessions.get(termId);
+        if (session && session.ws === ws) {
+          session.ptyProc.kill();
+          ptySessions.delete(termId);
+        }
       }
     } catch {
       /* ignore invalid messages */
     }
   });
 
-  ws.on("close", () => clients.delete(ws));
+  ws.on("close", () => {
+    clients.delete(ws);
+    // Kill all PTY sessions owned by this connection
+    for (const [termId, session] of ptySessions) {
+      if (session.ws === ws) {
+        session.ptyProc.kill();
+        ptySessions.delete(termId);
+      }
+    }
+  });
 });
 
 // Watcher

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { OfficeState } from './office/engine/officeState.js'
 import { OfficeCanvas } from './office/components/OfficeCanvas.js'
 import { ToolOverlay } from './office/components/ToolOverlay.js'
@@ -16,6 +16,7 @@ import { BottomToolbar } from './components/BottomToolbar.js'
 import { DebugView } from './components/DebugView.js'
 import { AgentStatusPanel } from './components/AgentStatusPanel.js'
 import type { AgentEntry } from './components/AgentStatusPanel.js'
+import { TerminalModal } from './office/components/TerminalModal.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -126,8 +127,33 @@ function App() {
   const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, agentProjectDirs, layoutReady, loadedAssets, workspaceFolders } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
-  const [chatTarget, setChatTarget] = useState<{ id: number; name: string; projectDir: string } | null>(null)
-  const [chatTask, setChatTask] = useState('')
+  const [terminalState, setTerminalState] = useState<{
+    termId: string
+    agentName: string
+    projectDir: string
+    outputQueue: string[]
+    isClosed: boolean
+  } | null>(null)
+
+  // Listen for PTY messages from server
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      const msg = e.data
+      if (msg.type === 'ptyOutput') {
+        setTerminalState((prev) => {
+          if (!prev || prev.termId !== msg.termId) return prev
+          return { ...prev, outputQueue: [...prev.outputQueue, msg.data as string] }
+        })
+      } else if (msg.type === 'ptyClosed') {
+        setTerminalState((prev) => {
+          if (!prev || prev.termId !== msg.termId) return prev
+          return { ...prev, isClosed: true }
+        })
+      }
+    }
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [])
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
 
@@ -156,17 +182,27 @@ function App() {
 
   const handleDoubleClickAgent = useCallback((id: number) => {
     const ch = getOfficeState().characters.get(id)
-    const name = ch?.folderName || `エージェント${id}`
+    const agentName = ch?.folderName || `エージェント${id}`
     const projectDir = agentProjectDirs[id] || '/root'
-    setChatTask('')
-    setChatTarget({ id, name, projectDir })
+    const termId = `agent-${id}-${Date.now()}`
+    setTerminalState({ termId, agentName, projectDir, outputQueue: [], isClosed: false })
+    vscode.postMessage({ type: 'openTerminal', termId, workDir: projectDir })
   }, [agentProjectDirs])
 
-  const handleChatSubmit = useCallback(() => {
-    if (!chatTarget || !chatTask.trim()) return
-    vscode.postMessage({ type: 'createAgent', task: chatTask.trim(), workDir: chatTarget.projectDir })
-    setChatTarget(null)
-  }, [chatTarget, chatTask])
+  const handleTerminalInput = useCallback((termId: string, data: string) => {
+    vscode.postMessage({ type: 'ptyInput', termId, data })
+  }, [])
+
+  const handleTerminalResize = useCallback((termId: string, cols: number, rows: number) => {
+    vscode.postMessage({ type: 'ptyResize', termId, cols, rows })
+  }, [])
+
+  const handleTerminalClose = useCallback(() => {
+    setTerminalState((prev) => {
+      if (prev) vscode.postMessage({ type: 'closeTerminal', termId: prev.termId })
+      return null
+    })
+  }, [])
 
   const handleSpawnAgent = useCallback((task: string, workDir: string, name?: string) => {
     vscode.postMessage({ type: 'createAgent', task, workDir, name })
@@ -253,87 +289,17 @@ function App() {
 
   return (
     <>
-    {chatTarget && (
-      <div
-        style={{
-          position: 'fixed',
-          inset: 0,
-          background: 'rgba(0,0,0,0.6)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-        }}
-        onClick={(e) => { if (e.target === e.currentTarget) setChatTarget(null) }}
-      >
-        <div
-          style={{
-            background: 'var(--pixel-bg)',
-            border: '2px solid var(--pixel-border-light)',
-            boxShadow: 'var(--pixel-shadow)',
-            padding: '16px 20px',
-            minWidth: 320,
-            maxWidth: 480,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <div style={{ fontSize: '24px', color: 'var(--pixel-text)', fontWeight: 'bold' }}>
-            {chatTarget.name} にタスクを依頼
-          </div>
-          <div style={{ fontSize: '18px', color: 'var(--pixel-text-dim)' }}>
-            {chatTarget.projectDir}
-          </div>
-          <div>
-            <div style={{ fontSize: '20px', color: 'var(--pixel-text-dim)', marginBottom: 4 }}>タスク</div>
-            <textarea
-              autoFocus
-              value={chatTask}
-              onChange={(e) => setChatTask(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleChatSubmit() }}
-              placeholder="例: このディレクトリのTypeScriptエラーを修正して"
-              rows={4}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                background: 'var(--vscode-input-background, #1e1e1e)',
-                color: 'var(--vscode-input-foreground, #d4d4d4)',
-                border: '1px solid var(--pixel-border)',
-                padding: '6px 8px',
-                fontSize: '20px',
-                resize: 'vertical',
-                borderRadius: 0,
-                fontFamily: 'inherit',
-              }}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button
-              onClick={() => setChatTarget(null)}
-              style={{ padding: '5px 10px', fontSize: '22px', color: 'var(--pixel-text)', background: 'var(--pixel-btn-bg)', border: '2px solid transparent', borderRadius: 0, cursor: 'pointer' }}
-            >
-              キャンセル
-            </button>
-            <button
-              onClick={handleChatSubmit}
-              disabled={!chatTask.trim()}
-              style={{
-                padding: '5px 10px',
-                fontSize: '22px',
-                background: chatTask.trim() ? 'var(--pixel-agent-bg)' : undefined,
-                border: '2px solid var(--pixel-agent-border)',
-                color: 'var(--pixel-agent-text)',
-                borderRadius: 0,
-                opacity: chatTask.trim() ? 1 : 0.4,
-                cursor: chatTask.trim() ? 'pointer' : 'default',
-              }}
-            >
-              依頼 (Ctrl+Enter)
-            </button>
-          </div>
-        </div>
-      </div>
+    {terminalState && (
+      <TerminalModal
+        termId={terminalState.termId}
+        agentName={terminalState.agentName}
+        projectDir={terminalState.projectDir}
+        onClose={handleTerminalClose}
+        onInput={handleTerminalInput}
+        onResize={handleTerminalResize}
+        outputQueue={terminalState.outputQueue}
+        isClosed={terminalState.isClosed}
+      />
     )}
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
       <style>{`

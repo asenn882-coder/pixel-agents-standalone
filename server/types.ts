@@ -51,7 +51,10 @@ export type ServerMessage = TaskServerMessage
   | { type: "layoutLoaded"; layout: unknown; version: number }
   | { type: "settingsLoaded"; soundEnabled: boolean }
   | { type: "agentSpawning"; task: string }
-  | { type: "agentSpawnError"; error: string };
+  | { type: "agentSpawnError"; error: string }
+  | { type: "ptyOpened"; termId: string }
+  | { type: "ptyOutput"; termId: string; data: string }
+  | { type: "ptyClosed"; termId: string };
 
 // Manual task (UI-created, not from JSONL watcher)
 export interface ManualTask {
@@ -78,4 +81,8 @@ export type ClientMessage =
   | { type: "createTask"; name: string }
   | { type: "updateTask"; id: number; status: "todo" | "in_progress" | "done" }
   | { type: "deleteTask"; id: number }
-  | { type: "createAgent"; task: string; workDir: string; name?: string };
+  | { type: "createAgent"; task: string; workDir: string; name?: string }
+  | { type: "openTerminal"; termId: string; workDir: string }
+  | { type: "ptyInput"; termId: string; data: string }
+  | { type: "ptyResize"; termId: string; cols: number; rows: number }
+  | { type: "closeTerminal"; termId: string };
